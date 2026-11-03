@@ -1,4 +1,4 @@
-# Smallest reasoning-capable model under RL: experiment protocol (draft v2)
+# Smallest reasoning-capable model under RL: experiment protocol (draft v3)
 
 2026-11-02 · asked by arush
 
@@ -53,6 +53,7 @@ If Stage B and Stage C disagree, report both.
 - Pretraining is cheap for small N. For N = 1B and T = 20B, 6ND gives about 1.2e20 FLOPs.
 - RL dominates. The chess paper (arXiv:2607.16097) reports about 160 H200 GPU-hours for 2,000 RL steps on a 50M model. Larger models cost more per step.
 - First pass: 8 sizes at 1 seed, then 3 to 5 seeds at 2 to 3 bracketing sizes. That is roughly 20 to 30 RL runs. Run a pilot to check real cost before committing.
+- [proposed, see section 14] Pretrain once per size and branch the RL seeds from that checkpoint. This would cut pretraining to one run per size.
 
 ## 10. Division of work [open]
 - Data pipeline: corpus, tokenizer, dedupe, shards, per-prefix checks.
@@ -75,11 +76,40 @@ Everyone reviews sections 6 and 7 before any run.
 ## 13. Limitations
 Countdown is not natural language, so a small-model result does not transfer automatically to math or general reasoning. The grid and seed count are small, so the threshold is coarse.
 
+## 14. Engineering settings [open, proposed]
+These are implementation choices. Settings marked "exact" should not change results, up to floating-point noise. Settings marked "model change" change the model, so they are ablations, not defaults. Every setting that changes numerics must be the same across the whole grid.
+
+Exact (proposed as defaults):
+- Mixed precision bf16, with fp32 for loss and optimizer states. Same for all sizes.
+- FlashAttention for attention.
+- Sequence packing with proper attention masking.
+- Gradient accumulation to hit the target batch size.
+- Gradient checkpointing only if memory requires it.
+- Memory-mapped shards with prefetch and pinned memory.
+- Fused optimizer and norm kernels, checked once against the reference on a few batches.
+- Vocabulary size and hidden dimensions as multiples of 64, chosen at config time.
+
+Numerics-changing (choose once, apply to whole grid, record in changelog):
+- torch.compile or CUDA graphs. Small models are often launch-bound, so this can help a lot.
+- Deterministic kernels, if affordable. Full determinism can cost speed.
+
+Experiment-structure savings (proposed):
+- Pretrain once per size. Branch SFT and RL seeds from that checkpoint, so only RL seeds vary. Check this does not hide variance we need for the verdict.
+- Cache SFT traces and held-out eval outputs.
+- Use vLLM or a similar engine for RL rollouts.
+- Checkpoint often, so preempted runs resume.
+- Stop dead RL runs early only under a pre-registered rule, for example zero reward for N consecutive steps.
+
+Ablation arms (model changes, not defaults):
+- Activation shift from Peng, Zheng and Liu (arXiv:2610.14500, 2026). The shift subtracts a constant b inside the MLP. Because the down-projection W2 trains, this is not a fixed bias that can be folded away in advance, so it must be implemented directly. How b is set for SwiGLU is undefined in the paper as I read it, so this arm is blocked until that is decided.
+
 ## Changelog
+- v3 (2026-11-02): added section 14 (engineering settings), and the checkpoint-sharing proposal in section 9.
 - v2 (2026-11-02): added data-side decisions (split, tokenizer, dedupe, nested shards, coverage), non-embedding N, and fixed token budget T = 20N.
 
 ## Sources
 - Understanding Reasoning from Pretraining to Post-Training, arXiv:2607.16097 (2026). https://arxiv.org/abs/2607.16097
+- Rethinking Activation Functions: Reducing Bias Can Improve Learning, Peng, Zheng and Liu, arXiv:2610.14500 (2026). https://arxiv.org/abs/2610.14500
 - Scaling Behaviors of LLM RL Post-Training, arXiv:2509.25300 (2025). https://arxiv.org/abs/2509.25300
 - A Technical Study into Small Reasoning Language Models, arXiv:2506.13404 (2025). https://arxiv.org/abs/2506.13404
 - Small Models Struggle to Learn from Strong Reasoners, arXiv:2502.12143 (2025). https://arxiv.org/abs/2502.12143
