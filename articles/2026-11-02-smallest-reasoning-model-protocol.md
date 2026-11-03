@@ -1,184 +1,153 @@
-# Smallest reasoning-capable model under RL: experiment protocol (draft v4)
+# Smallest reasoning-capable model under RL: experiment protocol (draft v5, minimum viable first run)
 
 2026-11-02 · asked by arush
 
-A draft protocol for finding N*, the smallest model size at which RL on a verifiable arithmetic task gives a reliable pass@1 gain, at Chinchilla-style token budgets. It is a living document: the setup and parameters will change, so each change should be recorded here with its date. Items marked [done] are settled, [open] still need a decision, and [speculative] marks my own estimates. Dates in section 15 are placeholders.
+A draft protocol for finding N*, the smallest model size at which RL on a verifiable arithmetic task gives a reliable pass@1 gain, at Chinchilla-style token budgets.
 
-The project runs in two stages. Stage 0 is a data audit that gates everything that depends on the corpus. Stage 1 is the experiment. A parallel track builds the non-data parts during Stage 0.
+This version scopes the first run down to the minimum that gives an answer. Everything else is kept in section L (Later), so the team can see the future paths without taking them on now. The protocol is a living document. Record every change in the changelog with its date. Items marked [done] are settled, [open] still need a decision, and [speculative] marks my own estimates. Dates are placeholders.
 
-# Stage 0: data audit (gate)
+# Part 1: First run (minimum viable)
 
-## 0.1 Freeze the prompt sets [open]
-- Freeze the held-out eval puzzles, SFT prompts and RL prompts. Record their hashes in the audit report.
-- Any change to a frozen set after the audit means the audit must be re-run.
+Goal: one answer to "what is N*?" as a bracket between two grid sizes, on one corpus and one task.
 
-## 0.2 Corpus choice and license [open]
-- Primary candidate: HuggingFaceTB/smollm-corpus, subset fineweb-edu-dedup (about 220B tokens). Verify its license on the dataset card before download.
-- Fallback or robustness corpus: mlfoundations/dclm-baseline-1.0. Its card says research use only; check before use.
-- Record the dataset name, revision and subset in the protocol.
-- Note: an educational quality filter can shift the pretraining floor and therefore N*. The corpus choice is part of the result and must be recorded.
+## 1. Question and hypothesis
+- Question: at Chinchilla-optimal pretraining, what is the smallest size N* at which RL on the task gives a reliable pass@1 gain?
+- Hypothesis (falsifiable): the verdict is monotone in size. If it is not, we report the flip pattern and N* is undefined.
 
-## 0.3 Contamination audit [open]
-- Level 1 (mandatory): verbatim overlap between the corpus and the frozen prompt sets, using 13-gram hashes after normalization. Any hit is removed.
-- Level 2: task-template phrasing (e.g. "Using the numbers ... equal ..."). Report counts. Decide the threshold for action in the pilot.
-- Level 3: arithmetic density (documents with many explicit equations). Report counts. Math-heavy web text is normal, so this is a review signal, not automatic removal.
-- Audit results are counts and document IDs only. Matched text is not copied into the repo.
-- Known limit: n-gram matching does not catch paraphrases.
+## 2. Stage 0: data gate
+- 0.1 Freeze the held-out eval puzzles, SFT prompts and RL prompts. Record their hashes.
+- 0.2 Corpus: HuggingFaceTB/smollm-corpus, subset fineweb-edu-dedup (about 220B tokens). [open] Verify its license on the dataset card. Record the revision and subset.
+- 0.3 Contamination audit, level 1 only: verbatim overlap between corpus and frozen prompt sets, using 13-gram hashes after normalization. Report counts and document IDs, never matched text.
+- 0.4 Remove level-1 hits before shuffling and sharding. Re-run the check on the final stream.
+- Gate: the final stream has zero level-1 hits, and the audit report (counts only) is committed.
+- Not gating in part 1: template and arithmetic-density checks. See section L.
 
-## 0.4 Filter and re-check [open]
-- Remove level-1 hits before shuffling and sharding. Otherwise the nested prefixes change and the shard checksums break.
-- Re-run level 1 on the final stream and confirm zero hits.
+## 3. Parallel build (during Stage 0)
+- Configs for the five grid sizes.
+- Countdown generator, SFT trace generation, RL code and binary reward.
+- Eval harness: pass@1 and pass@8 on at least 1,500 held-out puzzles.
+- Verdict code: RL-minus-SFT gain with bootstrap CI.
 
-## Stage 0 deliverables and gate
-- Frozen prompt hashes.
-- Audit report: counts per level, corpus name, revision, subset, date.
-- Removed document IDs (kept out of the repo unless the group decides otherwise).
-- Gate passes when: zero level-1 hits in the final stream, and the level-2 and level-3 decisions are recorded before any shard is built.
+## 4. Data (after the gate)
+- Tokenizer: trained on the train split only. Vocabulary fixed across sizes. [open] Size, 8k to 16k for natural text.
+- Dedupe: document-level, before sharding.
+- Shuffle: one global shuffle with a logged seed.
+- Nested shards: one tokenized stream. Model i reads the first T_i tokens. Shards are flat uint16 binaries, with an end-of-document token between documents.
+- Token budget: T_i = 20 * N_i. For the largest grid point (500M), that is 10B tokens, which the corpus covers.
+- Pilot check: shard i matches the first T_i tokens of the stream (checksum).
 
-## Parallel track (runs during Stage 0)
-- Model configs for the grid (section 4).
-- SFT and RL code, reward function, and the Countdown generator.
-- Eval harness, verdict criterion (section 6), bootstrap and curve-fitting code.
-- Pilot scripts for the checklist in section 11.
+## 5. Model grid
+- Architecture: dense decoder, pre-norm RMSNorm, RoPE, SwiGLU, grouped-query attention, tied embeddings. Fixed across sizes.
+- Size: N = non-embedding parameters. Embedding size is fixed across the grid.
+- Five sizes: 10M, 50M, 100M, 200M, 500M. [open] Confirm.
+- Vary width at roughly fixed depth-to-width ratio (about 64 to 128), one knob at a time. [speculative] The ratio is a heuristic.
+- Pretrain once per size. The SFT and RL seeds branch from that checkpoint. Only RL seeds vary in part 1. [speculative] This may understate pretraining variance, which is one reason for the later controls.
 
-# Stage 1: experiment (starts when the gate passes)
-
-## 1. Question
-At Chinchilla-optimal pretraining, what is the smallest model size N* at which RL on a verifiable task gives a reliable gain in pass@1? Below N*, RL should leave the policy at the zero-reward floor, or give gains within noise.
-
-## 2. Hypothesis (falsifiable)
-The verdict is monotone in size: once RL works at N, it works at every larger N in the grid. If the verdict flips back and forth, N* is undefined and we report the flip pattern.
-
-## 3. Data [partly done]
-- [done] Split first: carve out the held-out test set and eval probes before anything else. (Part of Stage 0 freeze.)
-- [done] Tokenizer: trained on the train split only, after Stage 0. Vocabulary fixed across all sizes. [open] Size: small (about 8k to 16k) for natural text, to keep the embedding cost low.
-- [done] Dedupe: document-level, including near-duplicates, before sharding.
-- [done] Shuffle and interleave: global shuffle with a logged seed. With multiple sources, interleave at fixed weights so every prefix has the same mix.
-- [done] Nested shards: one tokenized stream in shuffled order. Model i reads the first T_i tokens. Shards are flat uint16 binaries, with an end-of-document token between documents.
-- [open] Coverage: the corpus must hold at least T_max = 20 * N_max tokens. For a grid up to N = 1B, that is 20B tokens, about 40 GB of uint16 storage. If the corpus is smaller, cut the grid or gather more, because repeated data breaks the assumptions here.
-- [open] Per-prefix checks: token counts per source, length histograms, and loss of a fixed probe model on each prefix.
-
-## 4. Model grid [partly done]
-- [done] Architecture: dense decoder, pre-norm RMSNorm, RoPE, SwiGLU, grouped-query attention, tied embeddings. Fixed across sizes.
-- [done] Size definition: N = non-embedding parameters. Embedding size is fixed across the grid, so it cannot drive the threshold.
-- [done] Token budget: T_i = 20 * N_i. Shard i = first T_i tokens of the stream.
-- [open] Grid: 8 log-spaced sizes, e.g. 5M, 10M, 20M, 50M, 100M, 200M, 500M, 1B. Vary width at roughly fixed depth-to-width ratio (d/L about 64 to 128), one knob at a time. [speculative] The ratio is a heuristic, not a law.
-
-## 5. Task and pipeline [open items marked]
-- Task: Countdown-style arithmetic, binary reward. SFT and RL data are generated separately from the pretraining corpus, so the shard scheme does not apply to them.
+## 6. Task and pipeline
+- Task: Countdown-style arithmetic, binary reward. SFT and RL data are generated separately from the corpus.
 - SFT: synthetic reasoning traces from a fixed proposal policy, the same for all sizes.
-- RL: GRPO, fixed step budget and learning-rate schedule, same prompt set for all sizes. [open] Step count.
-- Eval: pass@1 and pass@8 on at least 1,500 held-out puzzles, disjoint from SFT and RL data. Bins B1 to B4 for eval, B5 held out for analysis.
+- RL: GRPO, fixed step budget and learning-rate schedule, same prompts for all sizes. [open] Step count.
+- Eval: pass@1 and pass@8 on at least 1,500 held-out puzzles, disjoint from SFT and RL data.
 
-## 6. Verdict criterion (pre-register before any run) [open]
-Reasoning is present at N if the RL-minus-SFT pass@1 gain is at least delta, with a 95% bootstrap CI excluding 0. Starting guess for delta: 2 points. The RL checkpoint's pass@1 must also be above the zero-reward floor on at least B2.
+## 7. Verdict criterion (pre-register before any run) [open]
+Reasoning is present at N if the RL-minus-SFT pass@1 gain is at least delta, with a 95% bootstrap CI excluding 0. Starting guess for delta: 2 points. The RL checkpoint must also be above the zero-reward floor on the B2 bin.
 
-N* = the smallest N in the grid where the verdict is "present" and every larger N is also "present".
+N* = the smallest grid size where the verdict is "present" and every larger size is also "present".
 
-## 7. Search
-- Stage A: all sizes, 1 seed. Mark the first flip.
-- Stage B: 3 to 5 seeds at the bracketing sizes, narrowing until the bracket is adjacent grid points.
-- Stage C: fit gain vs. log N over all runs; report N* with fit uncertainty.
+## 8. Search
+- Stage A: all five sizes, 1 seed each. Mark the first flip.
+- Stage B: 3 seeds at the two sizes bracketing the flip. Report the adjacent pair as the bracket for N*.
+- If the verdict flips more than once, report the flip pattern and stop.
 
-If Stage B and Stage C disagree, report both.
-
-## 8. Controls
-- Second shuffle seed at 2 to 3 sizes near the threshold, to check that a lucky prefix is not setting the result.
-- Second token budget (5 * N) to see how N* moves with data.
-- Second test distribution (B4 only, or multiplication) to check that N* is not specific to Countdown.
-- Second corpus (e.g. DCLM-baseline) at 2 to 3 sizes, if Stage 0 allows it.
-
-## 9. Compute [speculative estimate]
-- Pretraining is cheap for small N. For N = 1B and T = 20B, 6ND gives about 1.2e20 FLOPs.
-- RL dominates. The chess paper (arXiv:2607.16097) reports about 160 H200 GPU-hours for 2,000 RL steps on a 50M model. Larger models cost more per step.
-- First pass: 8 sizes at 1 seed, then 3 to 5 seeds at 2 to 3 bracketing sizes. That is roughly 20 to 30 RL runs. Run a pilot to check real cost before committing.
-- [proposed, see section 14] Pretrain once per size and branch the RL seeds from that checkpoint. This would cut pretraining to one run per size.
-
-## 10. Division of work [open]
-- Stage 0: prompt freeze, corpus check, contamination audit, filtering. One owner.
-- Parallel track: configs, RL and reward code, eval harness, verdict and fitting code. Split between the others.
-- Stage 1: tokenizer and shards, pretraining runs, SFT, RL, eval, write-up.
-
-Everyone reviews sections 6 and 7 before any run.
-
-## 11. Pilot checklist
-- Data: shard i equals the first T_i tokens of the stream (checksum). Per-prefix mix checks pass. Test set is disjoint from all training data.
-- One size, one seed, end to end. The RL reward is not all zeros. If it is, the task is too hard at that size and the curriculum needs to be easier.
+## 9. Pilot (first, before Stage A)
+- One size (suggest 50M), one seed, end to end.
+- The RL reward is not all zeros. If it is, the task is too hard at that size; make the curriculum easier before going on.
 - Eval noise: re-run one checkpoint with a different eval seed.
-- Level-2 and level-3 thresholds from section 0.3 are set and recorded.
 
-## 12. What would change our minds
-- The verdict flips more than once across the grid: monotonicity fails, so report the flip pattern.
-- Gains are present at every size, including the smallest: the floor is below the grid, so extend it downward.
+## 10. What would change our minds
+- The verdict flips more than once: monotonicity fails. Report the pattern.
+- Gains are present at every size, including the smallest: the floor is below the grid. Extend downward in a follow-up.
 - Gains are absent at every size: the task is too hard, not the model too small.
 
-## 13. Limitations
-Countdown is not natural language, so a small-model result does not transfer automatically to math or general reasoning. The grid and seed count are small, so the threshold is coarse. The contamination audit catches verbatim overlap, not paraphrase.
+## 11. Limitations
+- Countdown is not natural language. A small-model result does not transfer automatically to math or general reasoning.
+- Five sizes and few seeds: the bracket is coarse.
+- Level-1 audit catches verbatim overlap only, not paraphrase.
+- The first answer is provisional until one control from section L is run.
 
-## 14. Engineering settings [open, proposed]
-These are implementation choices. Settings marked "exact" should not change results, up to floating-point noise. Settings marked "model change" change the model, so they are ablations, not defaults. Every setting that changes numerics must be the same across the whole grid.
+## 12. Roles [open]
+- Stage 0 owner: corpus, license, audit, filtering.
+- Pilot and training owner: configs, shards, pretraining, SFT, RL.
+- Eval and write-up owner: eval harness, verdict, bracket report.
 
-Exact (proposed as defaults):
-- Mixed precision bf16, with fp32 for loss and optimizer states. Same for all sizes.
-- FlashAttention for attention.
-- Sequence packing with proper attention masking.
-- Gradient accumulation to hit the target batch size.
-- Gradient checkpointing only if memory requires it.
-- Memory-mapped shards with prefetch and pinned memory.
-- Fused optimizer and norm kernels, checked once against the reference on a few batches.
-- Vocabulary size and hidden dimensions as multiples of 64, chosen at config time.
+Everyone reviews sections 7 and 8 before any run.
 
-Numerics-changing (choose once, apply to whole grid, record in changelog):
-- torch.compile or CUDA graphs. Small models are often launch-bound, so this can help a lot.
-- Deterministic kernels, if affordable. Full determinism can cost speed.
-
-Experiment-structure savings (proposed):
-- Pretrain once per size. Branch SFT and RL seeds from that checkpoint, so only RL seeds vary. Check this does not hide variance we need for the verdict.
-- Cache SFT traces and held-out eval outputs.
-- Use vLLM or a similar engine for RL rollouts.
-- Checkpoint often, so preempted runs resume.
-- Stop dead RL runs early only under a pre-registered rule, for example zero reward for N consecutive steps.
-
-Ablation arms (model changes, not defaults):
-- Activation shift from Peng, Zheng and Liu (arXiv:2610.14500, 2026). The shift subtracts a constant b inside the MLP. Because the down-projection W2 trains, this is not a fixed bias that can be folded away in advance, so it must be implemented directly. How b is set for SwiGLU is undefined in the paper as I read it, so this arm is blocked until that is decided.
-
-## 15. Timeline [placeholder dates]
-The dates below are placeholders to show the shape of the plan. Shift them once the group agrees on a start date and on the durations. Stage 0 and the parallel track run together. Stage 1 starts only after the gate.
-
+## 13. Timeline [placeholder]
 ```mermaid
 gantt
-    title Project timeline (placeholder dates)
+    title First run (placeholder dates)
     dateFormat YYYY-MM-DD
     axisFormat %b %d
-    section Stage 0 (gate)
-    Freeze prompt sets           :s0a, 2026-11-09, 3d
-    Corpus choice and license    :s0b, 2026-11-09, 4d
-    Contamination audit          :s0c, after s0a, 7d
-    Filter and re-check          :s0d, after s0c, 3d
-    Gate review                  :milestone, s0g, after s0d, 0d
-    section Parallel track
-    Configs and grid             :p1, 2026-11-09, 10d
-    RL, reward and SFT code      :p2, 2026-11-09, 14d
-    Eval harness and fitting     :p3, 2026-11-09, 14d
-    section Stage 1 (experiment)
-    Tokenizer and shards         :e1, after s0g, 4d
-    Pilot (1 size, 1 seed)       :e2, after e1, 5d
-    Stage A coarse sweep         :e3, after e2, 10d
-    Stage B seeds at bracket     :e4, after e3, 10d
-    Stage C fit and write-up     :e5, after e4, 7d
+    section Stage 0
+    Freeze prompts, pick corpus  :a1, 2026-11-09, 4d
+    Level-1 audit and filter     :a2, after a1, 5d
+    Gate review                  :milestone, g1, after a2, 0d
+    section Build (parallel)
+    Configs, code, eval harness  :b1, 2026-11-09, 12d
+    section Stage 1
+    Tokenizer and shards         :c1, after g1, 3d
+    Pilot (50M, 1 seed)          :c2, after c1, 4d
+    Stage A (5 sizes, 1 seed)    :c3, after c2, 7d
+    Stage B (3 seeds at bracket) :c4, after c3, 7d
+    Write-up                     :c5, after c4, 4d
 ```
 
-Text version (weeks from start, placeholder):
-- Weeks 1 to 2: Stage 0 audit, parallel track building.
-- Week 2 to 3: gate review.
-- Weeks 3 to 4: tokenizer, shards, pilot.
-- Weeks 5 to 6: Stage A coarse sweep.
-- Weeks 7 to 8: Stage B seeds at the bracket.
-- Weeks 9 to 10: Stage C fit and write-up.
+## 14. Compute [speculative]
+- Stage A is 5 RL runs. Stage B is about 6 more (3 seeds at 2 sizes). Total about 11 RL runs.
+- The chess paper (arXiv:2607.16097) reports about 160 H200 GPU-hours for 2,000 RL steps at 50M. Larger sizes cost more. Expect a few thousand GPU-hours in total, to be confirmed by the pilot.
+
+---
+
+# Part 2: Later (not part of the first run)
+
+These are kept as paths to follow once the first answer exists. Each one should be proposed and agreed on before it is started. Nothing here is required for part 1.
+
+## L1. Audit extensions
+- Level 2: task-template phrasing (e.g. "Using the numbers ... equal ..."). Report counts; set a threshold for action in a pilot.
+- Level 3: arithmetic density (documents with many explicit equations). Review signal, not automatic removal.
+- Paraphrase-level overlap, which n-gram matching misses.
+
+## L2. Corpus and data controls
+- Second corpus, e.g. DCLM-baseline-1.0 (card says research use only; check before use), at 2 to 3 sizes.
+- Second shuffle seed at 2 to 3 sizes near the bracket.
+- Second token budget (5 * N) to see how N* moves with data.
+- Second test distribution (B4 only, or multiplication) to check that N* is not Countdown-specific.
+- Check that branching seeds from one pretraining checkpoint does not understate variance.
+
+## L3. Analysis
+- Stage C: fit gain vs. log N across all runs, and report N* with fit uncertainty.
+- Denser grid (8 sizes, e.g. adding 20M, 200M intervals, 1B) if the bracket is too coarse.
+- Verdict sensitivity to delta.
+
+## L4. Model variations
+- Activation-shift arm from Peng, Zheng and Liu (arXiv:2610.14500, 2026). The shift subtracts a constant b inside the MLP. Because W2 trains, the shift is not a fixed bias that can be folded away in advance, so it must be implemented directly. How b is set for SwiGLU is undefined in the paper as I read it, so this arm is blocked until that is decided.
+- Tokenizer size sweep.
+
+## L5. Engineering extras (numerics-changing: choose once, apply to the whole grid, record in changelog)
+- torch.compile or CUDA graphs. Small models are often launch-bound.
+- Deterministic kernels, if affordable.
+- Fused optimizer and norm kernels, checked once against the reference.
+- FlashAttention, sequence packing, memory-mapped shards and checkpointing are already in part 1 as defaults. [open] Confirm.
+
+## L6. Other paths
+- Other RL algorithms (e.g. PPO-style), to see if N* depends on the algorithm.
+- A natural-language task in place of Countdown.
+- A from-scratch sweep below 10M, if the floor sits at the bottom of the grid.
 
 ## Changelog
-- v4 (2026-11-02): split into Stage 0 (data audit gate) and Stage 1 (experiment), with a parallel track; added section 15 (timeline, placeholder dates); second corpus added to controls.
-- v3 (2026-11-02): added section 14 (engineering settings), and the checkpoint-sharing proposal in section 9.
+- v5 (2026-11-02): reduced to a minimum viable first run (part 1). Everything else moved to part 2 (section L) as later paths. Grid cut to five sizes, Stage C and ablations deferred, level-1 audit only.
+- v4 (2026-11-02): split into Stage 0 (data audit gate) and Stage 1 (experiment), with a parallel track; added timeline with placeholder dates; second corpus added to controls.
+- v3 (2026-11-02): added engineering settings and the checkpoint-sharing proposal.
 - v2 (2026-11-02): added data-side decisions (split, tokenizer, dedupe, nested shards, coverage), non-embedding N, and fixed token budget T = 20N.
 
 ## Sources
